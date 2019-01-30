@@ -11,9 +11,9 @@ backups and some older ones at increasing periods.
 ## Usage
 
 ```sh
-Usage of /tmp/go-build546230299/b001/exe/main:
+Usage of mysqlbak:
 
-/tmp/go-build546230299/b001/exe/main [...args] database1 database2 [...]
+mysqlbak [...args] database1 database2 [...]
 
 Options
   -bak string
