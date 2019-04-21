@@ -245,6 +245,10 @@ func (arch *Archiver) Rotate(database string) error {
 		}
 	}
 
+	if len(tapes["purge"]) == 0 {
+		arch.logger.Println("- No files to remove")
+	}
+
 	if len(errors) > 0 {
 		return fmt.Errorf("unable to remove all excess backups")
 	}

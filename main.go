@@ -89,20 +89,24 @@ func main() {
 	exit := 0
 
 	for _, dbname := range program.databases {
-		logger.Printf("Archiving %q.\n", dbname)
+		logger.Printf("Database: %q\n", dbname)
+		logger.Print("#########################\n\n")
+		logger.Println("Archiving...")
 		start := time.Now()
 		if err := arch.Archive(dbname); err != nil {
 			logger.Println(err)
 			exit = 1
 			continue
 		}
-		logger.Printf("Done in %s.\n", time.Now().Sub(start).String())
+		logger.Printf("Done in %s.\n\n", time.Now().Sub(start).String())
 		logger.Printf("Preparing to rotate logs for %q.\n", dbname)
 
 		if err := arch.Rotate(dbname); err != nil {
 			exit = 1
 			logger.Printf("Log rotation for %q encountered errors: %v", dbname, err)
 		}
+
+		logger.Println()
 	}
 
 	os.Exit(exit)
