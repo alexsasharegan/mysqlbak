@@ -3,7 +3,6 @@ package bak
 import (
 	"compress/gzip"
 	"fmt"
-	"github.com/alexsasharegan/mysqlbak/bytefmt"
 	"io/ioutil"
 	"log"
 	"os"
@@ -13,16 +12,26 @@ import (
 	"strings"
 	"time"
 
-	xtime "github.com/alexsasharegan/mysqlbak/now"
+	"github.com/alexsasharegan/mysqlbak/bytefmt"
 	"github.com/pkg/errors"
 )
 
 const (
-	quotaHourly = 3
-	quotaDaily  = 3
-	quotaWeekly = 1
-	quotaMonthy = 1
+	quota    = 10
+	timeBase = 30 * time.Minute
 )
+
+// An exponential series of durations controlled by the quota and timeBase.
+var timeSeries []int64
+
+func init() {
+	timeSeries = make([]int64, quota)
+
+	var n uint
+	for ; n < quota; n++ {
+		timeSeries[n] = int64(timeBase * (1 << n))
+	}
+}
 
 // Archiver performs, stores and rotates mysql backups.
 type Archiver struct {
@@ -117,127 +126,52 @@ func (arch *Archiver) Rotate(database string) error {
 	// Sort as recent => oldest
 	sort.Sort(FinfoList(fiBuf))
 
-	now := &xtime.Now{Time: time.Now()}
-	eod := now.BeginningOfDay()
-	eow := now.BeginningOfWeek()
-	eom := now.BeginningOfMonth()
+	// Make a set of backup tapes for each time series
+	tapes := make([][]*Finfo, quota)
+	now := time.Now().Unix()
+	for i, d := range timeSeries {
+		for j, fi := range fiBuf {
+			// Guard against the holes we progressively put in this slice
+			if fi == nil {
+				continue
+			}
 
-	tapes := make(map[string][]*Finfo)
+			// This file fits in this time window
+			if now-fi.created < d {
+				// safely add to the tape time series
+				tapes[i] = append(tapes[i], fi)
+				// remove it from further iterations
+				fiBuf[j] = nil
+			}
+		}
+	}
 
-	// First pass: put each backup in its natural time slot.
+	var purge []*Finfo
+	// Run back through the original buffer looking for leftovers (non-nil files)
+	// that are too old to fit inside the defined time series.
 	for _, fi := range fiBuf {
-		switch {
-		case fi.created > eod.Unix():
-			tapes["hourly"] = append(tapes["hourly"], fi)
-		case fi.created > eow.Unix():
-			tapes["daily"] = append(tapes["daily"], fi)
-		case fi.created > eom.Unix():
-			tapes["weekly"] = append(tapes["weekly"], fi)
-		default:
-			tapes["monthly"] = append(tapes["monthly"], fi)
+		if fi != nil {
+			purge = append(purge, fi)
 		}
 	}
+	fiBuf = nil
 
-	// Go through each backup tape from recent => oldest
-	// and fulfill each tape's quotas.
-	// If a tape series' quota is fulfilled and there are leftovers,
-	// check if the next time series is empty.
-	// If empty, advance the leftovers into the next time series.
-	// Check if backups collide with a time series (e.g. 2 in the same hour).
-	// Stage collisions for deletion.
-
-	seen := make(map[int]bool)
-	count := 0
-	for _, fi := range tapes["hourly"] {
-		// Purge same hour collisions
-		if seen[fi.time.Hour()] {
-			tapes["purge"] = append(tapes["purge"], fi)
+	// Run through our backups and look for collisions to purge.
+	// Collisions are multiple backups in a single timeframe.
+	for _, tape := range tapes {
+		// If this timeframe has 1 or none, it's good to go.
+		if len(tape) < 2 {
 			continue
 		}
 
-		seen[fi.time.Hour()] = true
-		// Handle quota fulfillment
-		if count >= quotaHourly {
-			if len(tapes["daily"]) == 0 {
-				tapes["daily"] = append(tapes["daily"], fi)
-			} else {
-				tapes["purge"] = append(tapes["purge"], fi)
-			}
-			continue
-		}
-
-		count++
-	}
-
-	seen = make(map[int]bool)
-	count = 0
-	for _, fi := range tapes["daily"] {
-		// Purge same day collisions
-		if seen[fi.time.Day()] {
-			tapes["purge"] = append(tapes["purge"], fi)
-			continue
-		}
-
-		seen[fi.time.Day()] = true
-		// Handle quota fulfillment
-		if count >= quotaDaily {
-			if len(tapes["weekly"]) == 0 {
-				tapes["weekly"] = append(tapes["weekly"], fi)
-			} else {
-				tapes["purge"] = append(tapes["purge"], fi)
-			}
-			continue
-		}
-
-		count++
-	}
-
-	seen = make(map[int]bool)
-	count = 0
-	for _, fi := range tapes["weekly"] {
-		// TODO: Purge same week collisions
-		if seen[fi.time.Day()] {
-			tapes["purge"] = append(tapes["purge"], fi)
-			continue
-		}
-
-		seen[fi.time.Day()] = true
-		// Handle quota fulfillment
-		if count >= quotaWeekly {
-			if len(tapes["monthly"]) == 0 {
-				tapes["monthly"] = append(tapes["monthly"], fi)
-			} else {
-				tapes["purge"] = append(tapes["purge"], fi)
-			}
-			continue
-		}
-
-		count++
-	}
-
-	seen = make(map[int]bool)
-	count = 0
-	for _, fi := range tapes["monthly"] {
-		// Purge same month collisions
-		if seen[int(fi.time.Month())] {
-			tapes["purge"] = append(tapes["purge"], fi)
-			continue
-		}
-
-		seen[int(fi.time.Month())] = true
-		// Handle quota fulfillment
-		if count >= quotaMonthy {
-			tapes["purge"] = append(tapes["purge"], fi)
-			continue
-		}
-
-		count++
+		// This timeframe has collisions to be removed. Purge all but the first.
+		purge = append(purge, tape[1:]...)
 	}
 
 	arch.logger.Println("Backups staged for removal:")
 	arch.logger.Println()
 	var errors []error
-	for _, fi := range tapes["purge"] {
+	for _, fi := range purge {
 		arch.logger.Printf("- %s\n", fi.Name())
 		if err := os.Remove(filepath.Join(arch.BackupPath, database, fi.Name())); err != nil {
 			errors = append(errors, err)
@@ -245,7 +179,7 @@ func (arch *Archiver) Rotate(database string) error {
 		}
 	}
 
-	if len(tapes["purge"]) == 0 {
+	if len(purge) == 0 {
 		arch.logger.Println("- No files to remove")
 	}
 
