@@ -21,4 +21,5 @@ Options
   -h    show help
   -help
         show help (long form)
+  -p    make parent directories as needed
 ```
