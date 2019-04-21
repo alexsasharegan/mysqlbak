@@ -22,14 +22,14 @@ const (
 )
 
 // An exponential series of durations controlled by the quota and timeBase.
-var timeSeries []int64
+var timeSeries []time.Duration
 
 func init() {
-	timeSeries = make([]int64, quota)
+	timeSeries = make([]time.Duration, quota)
 
 	var n uint
 	for ; n < quota; n++ {
-		timeSeries[n] = int64(timeBase * (1 << n))
+		timeSeries[n] = timeBase * (1 << n)
 	}
 }
 
@@ -137,7 +137,7 @@ func (arch *Archiver) Rotate(database string) error {
 			}
 
 			// This file fits in this time window
-			if now-fi.created < d {
+			if float64(now-fi.created) < d.Seconds() {
 				// safely add to the tape time series
 				tapes[i] = append(tapes[i], fi)
 				// remove it from further iterations
