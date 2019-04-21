@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	quota    = 10
+	quota    = 12
 	timeBase = 30 * time.Minute
 )
 
@@ -25,11 +25,15 @@ const (
 var timeSeries []time.Duration
 
 func init() {
-	timeSeries = make([]time.Duration, quota)
+	timeSeries = make([]time.Duration, quota+1)
+
+	// add a special case for recent backups.
+	timeSeries[0] = 5 * time.Minute
 
 	var n uint
-	for ; n < quota; n++ {
-		timeSeries[n] = timeBase * (1 << n)
+	// Subtract the special case so quota is correct
+	for ; n < quota-1; n++ {
+		timeSeries[n+1] = timeBase * (1 << n)
 	}
 }
 
@@ -158,9 +162,15 @@ func (arch *Archiver) Rotate(database string) error {
 
 	// Run through our backups and look for collisions to purge.
 	// Collisions are multiple backups in a single timeframe.
-	for _, tape := range tapes {
+	for i, tape := range tapes {
 		// If this timeframe has 1 or none, it's good to go.
 		if len(tape) < 2 {
+			continue
+		}
+
+		// Push excess into the next timeframe only if empty (and not at end of list).
+		if len(tape)-1 != i && len(tapes[i+1]) == 0 {
+			tapes[i+1] = append(tapes[i+1], tape[1:]...)
 			continue
 		}
 
