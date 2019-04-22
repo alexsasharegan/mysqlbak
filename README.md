@@ -17,9 +17,12 @@ mysqlbak [...args] database1 database2 [...]
 
 Options
   -bak string
-        path to the backup directory (default "/var/bak/mysql")
-  -h    show help
+    	path to the backup directory (default "/var/bak/mysql")
+  -c string
+    	path to a config file
+  -h	show help
   -help
-        show help (long form)
-  -p    make parent directories as needed
+    	show help (long form)
+  -p	make parent directories as needed
+
 ```
