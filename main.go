@@ -120,17 +120,24 @@ func main() {
 
 	var exit int
 	defer func() {
-		output.WriteString(fmt.Sprintf("Exit code: %d\n", exit))
+		logger.Printf("Exit code: %d\n", exit)
+
+		if program.Mailgun == nil {
+			os.Exit(exit)
+		}
+
 		m := xmail.Message{
 			Body:      output.String(),
 			Recipient: program.Mailgun.MailTo,
 			Subject:   "MySQL Backup",
 		}
 		m.SetConfig(program.Mailgun)
-		_, _, err := xmail.Send(nil, &m)
-		if err != nil {
+
+		if _, _, err := xmail.Send(nil, &m); err != nil {
 			logger.Println(err)
 		}
+
+		os.Exit(exit)
 	}()
 
 	for _, dbname := range program.Databases {
@@ -153,8 +160,6 @@ func main() {
 
 		logger.Println()
 	}
-
-	os.Exit(exit)
 }
 
 func resolveConf(program *Program, path string) error {
