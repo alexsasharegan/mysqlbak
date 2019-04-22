@@ -1,9 +1,7 @@
 package xmail
 
 import (
-	"context"
 	"fmt"
-	"time"
 
 	mailgun "github.com/mailgun/mailgun-go"
 )
@@ -34,14 +32,8 @@ func (m *Message) SetConfig(mc *MailConfig) {
 }
 
 // Send an email with mailgun.
-func Send(ctx context.Context, msg *Message) (mes string, id string, err error) {
+func Send(msg *Message) (mes string, id string, err error) {
 	mg := mailgun.NewMailgun(msg.domain, msg.apikey)
-	if ctx == nil {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(context.Background(), time.Second*30)
-		defer cancel()
-	}
-
 	m := mg.NewMessage(msg.sender, msg.Subject, msg.Body, msg.Recipient)
-	return mg.Send(ctx, m)
+	return mg.Send(m)
 }

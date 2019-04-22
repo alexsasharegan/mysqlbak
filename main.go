@@ -133,7 +133,7 @@ func main() {
 		}
 		m.SetConfig(program.Mailgun)
 
-		if _, _, err := xmail.Send(nil, &m); err != nil {
+		if _, _, err := xmail.Send(&m); err != nil {
 			logger.Println(err)
 		}
 
