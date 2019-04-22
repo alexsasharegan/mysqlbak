@@ -108,9 +108,11 @@ func (arch *Archiver) Rotate(database string) error {
 	arch.logger.Println()
 
 	fiBuf := make([]*Finfo, 0, len(fis))
+	now := time.Now()
+	nowUnix := now.Unix()
+
 	for _, finfo := range fis {
 		name := finfo.Name()
-		arch.logger.Printf("- [%s] %s\n", bytefmt.ByteSize(finfo.Size()), name)
 
 		ftime, err := time.Parse(arch.TimeFormat, name[:strings.IndexRune(name, '.')])
 		if err != nil {
@@ -119,6 +121,11 @@ func (arch *Archiver) Rotate(database string) error {
 			)
 			continue
 		}
+
+		arch.logger.Printf(
+			"- [%s %6.1fhrs] %s\n",
+			bytefmt.ByteSize(finfo.Size()), now.Sub(ftime).Hours(), name)
+
 		fiBuf = append(fiBuf, &Finfo{
 			FileInfo: finfo,
 			time:     ftime,
@@ -133,7 +140,6 @@ func (arch *Archiver) Rotate(database string) error {
 
 	// Make a set of backup tapes for each time series
 	tapes := make([][]*Finfo, quota)
-	now := time.Now().Unix()
 	for i, d := range timeSeries {
 		for j, fi := range fiBuf {
 			// Guard against the holes we progressively put in this slice
@@ -142,7 +148,7 @@ func (arch *Archiver) Rotate(database string) error {
 			}
 
 			// This file fits in this time window
-			if float64(now-fi.created) < d.Seconds() {
+			if float64(nowUnix-fi.created) < d.Seconds() {
 				// safely add to the tape time series
 				tapes[i] = append(tapes[i], fi)
 				// remove it from further iterations

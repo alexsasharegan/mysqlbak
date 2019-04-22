@@ -151,7 +151,7 @@ func main() {
 			continue
 		}
 		logger.Printf("Done in %s.\n\n", time.Now().Sub(start).String())
-		logger.Printf("Preparing to rotate logs for %q.\n", dbname)
+		logger.Printf("Preparing to rotate backups for %q.\n", dbname)
 
 		if err := arch.Rotate(dbname); err != nil {
 			exit = 1
