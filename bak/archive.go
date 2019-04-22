@@ -22,6 +22,7 @@ const (
 )
 
 // An exponential series of durations controlled by the quota and timeBase.
+// https://www.tablix.org/~avian/blog/archives/2015/01/exponential_backup_rotation/
 var timeSeries []time.Duration
 
 func init() {
