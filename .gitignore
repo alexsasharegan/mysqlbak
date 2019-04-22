@@ -12,3 +12,4 @@
 *.out
 /main
 /mysqlbak
+/config.toml
