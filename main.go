@@ -142,14 +142,16 @@ func main() {
 
 	for _, dbname := range program.Databases {
 		logger.Printf("Database: %q\n", dbname)
-		logger.Print(strings.Repeat("#", 32) + "\n\n")
+		logger.Print(strings.Repeat("=", 32) + "\n\n")
 		logger.Println("Archiving...")
+
 		start := time.Now()
 		if err := arch.Archive(dbname); err != nil {
 			logger.Println(err)
 			exit = 1
 			continue
 		}
+
 		logger.Printf("Done in %s.\n\n", time.Now().Sub(start).String())
 		logger.Printf("Preparing to rotate backups for %q.\n", dbname)
 
@@ -177,8 +179,7 @@ func resolveConf(program *Program, path string) error {
 		return err
 	}
 
-	_, err = toml.DecodeReader(f, &conf)
-	if err != nil {
+	if _, err := toml.DecodeReader(f, &conf); err != nil {
 		return err
 	}
 
