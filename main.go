@@ -125,11 +125,14 @@ func main() {
 		if program.Mailgun == nil {
 			os.Exit(exit)
 		}
+		if program.Mailgun.Subject == "" {
+			program.Mailgun.Subject = "MySQL Backup"
+		}
 
 		m := xmail.Message{
 			Body:      output.String(),
 			Recipient: program.Mailgun.MailTo,
-			Subject:   "MySQL Backup",
+			Subject:   program.Mailgun.Subject,
 		}
 		m.SetConfig(program.Mailgun)
 

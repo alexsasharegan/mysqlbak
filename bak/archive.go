@@ -17,24 +17,21 @@ import (
 )
 
 const (
-	quota    = 12
-	timeBase = 30 * time.Minute
+	quota            = 12
+	rotationInterval = time.Hour
 )
 
-// An exponential series of durations controlled by the quota and timeBase.
+// An exponential series of durations controlled by the quota and rotationInterval.
 // https://www.tablix.org/~avian/blog/archives/2015/01/exponential_backup_rotation/
 var timeSeries []time.Duration
 
 func init() {
-	timeSeries = make([]time.Duration, quota+1)
-
 	// add a special case for recent backups.
+	timeSeries = make([]time.Duration, quota)
 	timeSeries[0] = 5 * time.Minute
 
-	var n uint
-	// Subtract the special case so quota is correct
-	for ; n < quota-1; n++ {
-		timeSeries[n+1] = timeBase * (1 << n)
+	for n := 1; n < quota; n++ {
+		timeSeries[n] = rotationInterval * 1 << uint(n-1)
 	}
 }
 
@@ -57,7 +54,7 @@ func (arch *Archiver) Archive(database string) (eArch error) {
 	f, err := os.OpenFile(
 		filepath.Join(arch.BackupPath, database, fmt.Sprintf("%s.sql.gz", now)),
 		os.O_CREATE|os.O_WRONLY,
-		0666,
+		0664,
 	)
 	if err != nil {
 		return errors.Wrapf(err, "failed to open db archive for %q", database)
@@ -107,96 +104,27 @@ func (arch *Archiver) Rotate(database string) error {
 	arch.logger.Println("Directory listing:")
 	arch.logger.Println()
 
-	fiBuf := make([]*Finfo, 0, len(fis))
 	now := time.Now()
-	nowUnix := now.Unix()
-
-	for _, finfo := range fis {
-		name := finfo.Name()
-
-		ftime, err := time.Parse(arch.TimeFormat, name[:strings.IndexRune(name, '.')])
-		if err != nil {
-			arch.logger.Println(
-				errors.Wrapf(err, "failed to parse time of backup from filename %q", name),
-			)
-			continue
-		}
-
-		arch.logger.Printf(
-			"- [%s %6.1fhrs] %s\n",
-			bytefmt.ByteSize(finfo.Size()), now.Sub(ftime).Hours(), name)
-
-		fiBuf = append(fiBuf, &Finfo{
-			FileInfo: finfo,
-			time:     ftime,
-			created:  ftime.Unix(),
-		})
-	}
+	fiBuf := arch.parseFileInfoList(fis, now)
+	a := arch.sortAsArchives(fiBuf, now)
 
 	arch.logger.Println()
-
-	// Sort as recent => oldest
-	sort.Sort(FinfoList(fiBuf))
-
-	// Make a set of backup tapes for each time series
-	tapes := make([][]*Finfo, quota)
-	for i, d := range timeSeries {
-		for j, fi := range fiBuf {
-			// Guard against the holes we progressively put in this slice
-			if fi == nil {
-				continue
-			}
-
-			// This file fits in this time window
-			if float64(nowUnix-fi.created) < d.Seconds() {
-				// safely add to the tape time series
-				tapes[i] = append(tapes[i], fi)
-				// remove it from further iterations
-				fiBuf[j] = nil
-			}
-		}
-	}
-
-	var purge []*Finfo
-	// Run back through the original buffer looking for leftovers (non-nil files)
-	// that are too old to fit inside the defined time series.
-	for _, fi := range fiBuf {
-		if fi != nil {
-			purge = append(purge, fi)
-		}
-	}
-	fiBuf = nil
-
-	// Run through our backups and look for collisions to purge.
-	// Collisions are multiple backups in a single timeframe.
-	for i, tape := range tapes {
-		// If this timeframe has 1 or none, it's good to go.
-		if len(tape) < 2 {
-			continue
-		}
-
-		// Push excess into the next timeframe only if empty (and not at end of list).
-		if len(tape)-1 != i && len(tapes[i+1]) == 0 {
-			tapes[i+1] = append(tapes[i+1], tape[1:]...)
-			continue
-		}
-
-		// This timeframe has collisions to be removed. Purge all but the first.
-		purge = append(purge, tape[1:]...)
-	}
-
 	arch.logger.Println("Backups staged for removal:")
 	arch.logger.Println()
+
 	var errors []error
-	for _, fi := range purge {
+	for _, fi := range a.purge {
 		arch.logger.Printf("- %s\n", fi.Name())
-		if err := os.Remove(filepath.Join(arch.BackupPath, database, fi.Name())); err != nil {
+		err := os.Remove(
+			filepath.Join(arch.BackupPath, database, fi.Name()),
+		)
+		if err != nil {
 			errors = append(errors, err)
 			arch.logger.Printf("  - failed (%v)\n", err)
 		}
 	}
 
-	if len(purge) == 0 {
+	if len(a.purge) == 0 {
 		arch.logger.Println("- No files to remove")
 	}
 
@@ -228,4 +156,104 @@ func (fil FinfoList) Less(i, j int) bool {
 
 func (fil FinfoList) Swap(i, j int) {
 	fil[i], fil[j] = fil[j], fil[i]
+}
+
+func (arch *Archiver) parseFileInfoList(fis []os.FileInfo, now time.Time) []*Finfo {
+	fiBuf := make([]*Finfo, 0, len(fis))
+
+	for _, finfo := range fis {
+		name := finfo.Name()
+
+		dotIdx := strings.IndexRune(name, '.')
+		if dotIdx == -1 {
+			arch.logger.Printf("no file extension found: %q", name)
+			continue
+		}
+
+		ftime, err := time.Parse(arch.TimeFormat, name[:dotIdx])
+		if err != nil {
+			arch.logger.Println(
+				errors.Wrapf(err, "failed to parse time of backup from filename %q", name),
+			)
+			continue
+		}
+
+		arch.logger.Printf(
+			"- [%s %6.1fhrs] %s\n",
+			bytefmt.ByteSize(finfo.Size()), now.Sub(ftime).Hours(), name)
+
+		fiBuf = append(fiBuf, &Finfo{
+			FileInfo: finfo,
+			time:     ftime,
+			created:  ftime.Unix(),
+		})
+	}
+
+	sortFileInfo(fiBuf)
+
+	return fiBuf
+}
+
+func sortFileInfo(fis []*Finfo) {
+	// Sort as recent => oldest
+	sort.Sort(FinfoList(fis))
+}
+
+type archives struct {
+	tapes [][]*Finfo
+	purge []*Finfo
+}
+
+func (arch *Archiver) sortAsArchives(files FinfoList, now time.Time) archives {
+	nowUnix := now.Unix()
+	a := archives{
+		tapes: make([][]*Finfo, quota),
+	}
+
+	// Make a set of backup tapes for each time series
+	tapes := make([][]*Finfo, quota)
+	for i, d := range timeSeries {
+		for j, f := range files {
+			// Guard against the holes we progressively put in this slice
+			if f == nil {
+				continue
+			}
+
+			// This file fits in this time window
+			if float64(nowUnix-f.created) < d.Seconds() {
+				// safely add to the tape time series
+				tapes[i] = append(tapes[i], f)
+				// remove it from further iterations
+				files[j] = nil
+			}
+		}
+	}
+
+	// Run back through the original buffer looking for leftovers (non-nil files)
+	// that are too old to fit inside the defined time series.
+	for _, f := range files {
+		if f != nil {
+			a.purge = append(a.purge, f)
+		}
+	}
+
+	// Run through our backups and look for collisions to purge.
+	// Collisions are multiple backups in a single timeframe.
+	for i, t := range tapes {
+		// If this timeframe has 1 or none, it's good to go.
+		if len(t) < 2 {
+			continue
+		}
+
+		// Push excess into the next timeframe only if empty (and not at end of list).
+		if len(tapes)-1 != i && len(tapes[i+1]) == 0 {
+			tapes[i+1] = append(tapes[i+1], t[1:]...)
+			continue
+		}
+
+		// This timeframe has collisions to be removed. Purge all but the first.
+		a.purge = append(a.purge, t[1:]...)
+	}
+
+	return a
 }

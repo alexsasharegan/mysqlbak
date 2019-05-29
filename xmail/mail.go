@@ -8,10 +8,11 @@ import (
 
 // MailConfig configures Mailgun.
 type MailConfig struct {
-	ApiKey string
-	Domain string
-	Sender string
-	MailTo string
+	ApiKey  string
+	Domain  string
+	Sender  string
+	MailTo  string
+	Subject string
 }
 
 // Message is an email message.
