@@ -2,8 +2,8 @@ package bak
 
 import (
 	"compress/gzip"
+	"errors"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"os/exec"
@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/alexsasharegan/mysqlbak/bytefmt"
-	"github.com/pkg/errors"
 )
 
 const (
@@ -21,12 +20,11 @@ const (
 	rotationInterval = time.Hour
 )
 
-// An exponential series of durations controlled by the quota and rotationInterval.
+// An exponential series of durations controlled by quota and rotationInterval.
 // https://www.tablix.org/~avian/blog/archives/2015/01/exponential_backup_rotation/
 var timeSeries []time.Duration
 
 func init() {
-	// add a special case for recent backups.
 	timeSeries = make([]time.Duration, quota)
 	timeSeries[0] = 5 * time.Minute
 
@@ -57,26 +55,20 @@ func (arch *Archiver) Archive(database string) (eArch error) {
 		0664,
 	)
 	if err != nil {
-		return errors.Wrapf(err, "failed to open db archive for %q", database)
+		return fmt.Errorf("failed to open db archive for %q: %w", database, err)
 	}
 
 	defer func() {
-		err := f.Close()
-		if err != nil {
-			eArch = errors.Wrap(err, fmt.Sprintf("failed closing the file archive for %q", database))
-			// If our command fails and the file close errors,
-			// the error won't be returned, so we'll log here.
+		if err := f.Close(); err != nil {
+			eArch = fmt.Errorf("failed closing the file archive for %q: %w", database, err)
 			arch.logger.Println(eArch)
 		}
 	}()
 
 	gzw := gzip.NewWriter(f)
 	defer func() {
-		err := gzw.Close()
-		if err != nil {
-			eArch = errors.Wrap(err, fmt.Sprintf("failed closing the gzip archiver for %q", database))
-			// If our command fails and the gzip close errors,
-			// the error won't be returned, so we'll log here.
+		if err := gzw.Close(); err != nil {
+			eArch = fmt.Errorf("failed closing the gzip archiver for %q: %w", database, err)
 			arch.logger.Println(eArch)
 		}
 	}()
@@ -87,22 +79,32 @@ func (arch *Archiver) Archive(database string) (eArch error) {
 
 	// Delete orphaned files created by a failed dump.
 	if err := cmd.Run(); err != nil {
-		os.Remove(f.Name())
-		return errors.Wrapf(err, "mysql dump failed on database %q", database)
+		rmErr := os.Remove(f.Name())
+		runErr := fmt.Errorf("mysql dump failed on database %q: %w", database, err)
+		return errors.Join(runErr, rmErr)
 	}
 
-	return
+	return nil
 }
 
 // Rotate purges old backups in a given database subdirectory.
 func (arch *Archiver) Rotate(database string) error {
-	fis, err := ioutil.ReadDir(filepath.Join(arch.BackupPath, database))
+	entries, err := os.ReadDir(filepath.Join(arch.BackupPath, database))
 	if err != nil {
-		return errors.Wrapf(err, "failed to list directory %q", database)
+		return fmt.Errorf("failed to list directory %q: %w", database, err)
 	}
 
 	arch.logger.Println("Directory listing:")
 	arch.logger.Println()
+
+	var fis []os.FileInfo
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		fis = append(fis, info)
+	}
 
 	now := time.Now()
 	fiBuf := arch.parseFileInfoList(fis, now)
@@ -112,14 +114,11 @@ func (arch *Archiver) Rotate(database string) error {
 	arch.logger.Println("Backups staged for removal:")
 	arch.logger.Println()
 
-	var errors []error
+	var removeErrors []error
 	for _, fi := range a.purge {
 		arch.logger.Printf("- %s\n", fi.Name())
-		err := os.Remove(
-			filepath.Join(arch.BackupPath, database, fi.Name()),
-		)
-		if err != nil {
-			errors = append(errors, err)
+		if err := os.Remove(filepath.Join(arch.BackupPath, database, fi.Name())); err != nil {
+			removeErrors = append(removeErrors, err)
 			arch.logger.Printf("  - failed (%v)\n", err)
 		}
 	}
@@ -128,7 +127,7 @@ func (arch *Archiver) Rotate(database string) error {
 		arch.logger.Println("- No files to remove")
 	}
 
-	if len(errors) > 0 {
+	if len(removeErrors) > 0 {
 		return fmt.Errorf("unable to remove all excess backups")
 	}
 
@@ -145,18 +144,9 @@ type Finfo struct {
 // FinfoList implements sort.Interface
 type FinfoList []*Finfo
 
-func (fil FinfoList) Len() int {
-	return len(fil)
-}
-
-// Less prefers the latest time
-func (fil FinfoList) Less(i, j int) bool {
-	return fil[i].created > fil[j].created
-}
-
-func (fil FinfoList) Swap(i, j int) {
-	fil[i], fil[j] = fil[j], fil[i]
-}
+func (fil FinfoList) Len() int           { return len(fil) }
+func (fil FinfoList) Less(i, j int) bool { return fil[i].created > fil[j].created }
+func (fil FinfoList) Swap(i, j int)      { fil[i], fil[j] = fil[j], fil[i] }
 
 func (arch *Archiver) parseFileInfoList(fis []os.FileInfo, now time.Time) []*Finfo {
 	fiBuf := make([]*Finfo, 0, len(fis))
@@ -164,17 +154,14 @@ func (arch *Archiver) parseFileInfoList(fis []os.FileInfo, now time.Time) []*Fin
 	for _, finfo := range fis {
 		name := finfo.Name()
 
-		dotIdx := strings.IndexRune(name, '.')
-		if dotIdx == -1 {
-			arch.logger.Printf("no file extension found: %q", name)
+		if !strings.HasSuffix(name, ".sql.gz") {
 			continue
 		}
 
-		ftime, err := time.Parse(arch.TimeFormat, name[:dotIdx])
+		timeStr := strings.TrimSuffix(name, ".sql.gz")
+		ftime, err := time.Parse(arch.TimeFormat, timeStr)
 		if err != nil {
-			arch.logger.Println(
-				errors.Wrapf(err, "failed to parse time of backup from filename %q", name),
-			)
+			arch.logger.Printf("failed to parse time of backup from filename %q: %v\n", name, err)
 			continue
 		}
 
@@ -195,7 +182,6 @@ func (arch *Archiver) parseFileInfoList(fis []os.FileInfo, now time.Time) []*Fin
 }
 
 func sortFileInfo(fis []*Finfo) {
-	// Sort as recent => oldest
 	sort.Sort(FinfoList(fis))
 }
 
@@ -210,50 +196,35 @@ func (arch *Archiver) sortAsArchives(files FinfoList, now time.Time) archives {
 		tapes: make([][]*Finfo, quota),
 	}
 
-	// Make a set of backup tapes for each time series
 	tapes := make([][]*Finfo, quota)
 	for i, d := range timeSeries {
 		for j, f := range files {
-			// Guard against the holes we progressively put in this slice
 			if f == nil {
 				continue
 			}
 
-			// This file fits in this time window
 			if float64(nowUnix-f.created) < d.Seconds() {
-				// safely add to the tape time series
 				tapes[i] = append(tapes[i], f)
-				// remove it from further iterations
 				files[j] = nil
 			}
 		}
 	}
 
-	// Run back through the original buffer looking for leftovers (non-nil files)
-	// that are too old to fit inside the defined time series.
+	// Unclaimed files older than max timeframe are purged
 	for _, f := range files {
 		if f != nil {
 			a.purge = append(a.purge, f)
 		}
 	}
 
-	// Run through our backups and look for collisions to purge.
-	// Collisions are multiple backups in a single timeframe.
+	// Purge collisions within each timeframe tape and retain only the first snapshot
 	for i, t := range tapes {
-		// If this timeframe has 1 or none, it's good to go.
-		if len(t) < 2 {
-			continue
+		if len(t) > 1 {
+			a.purge = append(a.purge, t[1:]...)
+			tapes[i] = t[:1]
 		}
-
-		// Push excess into the next timeframe only if empty (and not at end of list).
-		if len(tapes)-1 != i && len(tapes[i+1]) == 0 {
-			tapes[i+1] = append(tapes[i+1], t[1:]...)
-			continue
-		}
-
-		// This timeframe has collisions to be removed. Purge all but the first.
-		a.purge = append(a.purge, t[1:]...)
 	}
 
+	a.tapes = tapes
 	return a
 }

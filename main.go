@@ -35,69 +35,81 @@ const (
 	defBak     = "/var/bak/mysql"
 )
 
-var (
-	program = &Program{}
-	output  = &bytes.Buffer{}
-	logger  = log.New(io.MultiWriter(os.Stderr, output), "", 0)
-)
-
-// Usage prints the command help to stderr and exits.
-func (p *Program) Usage() {
-	logger.Printf("Usage of %s:\n", os.Args[0])
-	logger.Printf("\n%s [...args] database1 database2 [...]\n\n", os.Args[0])
-	logger.Println("Options")
-	flag.PrintDefaults()
-	logger.Println()
-
-	os.Exit(1)
+func main() {
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
-func init() {
-	h := flag.Bool("h", false, "show help")
-	help := flag.Bool("help", false, "show help (long form)")
+func run(args []string, _, stderr io.Writer) int {
+	output := &bytes.Buffer{}
+	logger := log.New(io.MultiWriter(stderr, output), "", 0)
 
-	BackupPath := flag.String("bak", defBak, "path to the backup directory")
-	conf := flag.String("c", "", "path to a config file")
-	parents := flag.Bool("p", false, "make parent directories as needed")
+	fs := flag.NewFlagSet("mysqlbak", flag.ContinueOnError)
+	fs.SetOutput(stderr)
 
-	flag.Parse()
+	h := fs.Bool("h", false, "show help")
+	help := fs.Bool("help", false, "show help (long form)")
+	bakPathFlag := fs.String("bak", defBak, "path to the backup directory")
+	confFlag := fs.String("c", "", "path to a config file")
+	parentsFlag := fs.Bool("p", false, "make parent directories as needed")
 
-	if err := resolveConf(program, *conf); err != nil {
-		logger.Fatalln(err)
+	if err := fs.Parse(args); err != nil {
+		return 1
 	}
 
-	dbs := flag.Args()
+	if *h || *help {
+		fs.Usage()
+		return 0
+	}
+
+	program := &Program{
+		BackupPath: defBak,
+	}
+
+	// Track explicitly set flags on the CLI invocation
+	explicitFlags := make(map[string]bool)
+	fs.Visit(func(f *flag.Flag) {
+		explicitFlags[f.Name] = true
+	})
+
+	// 1. Resolve configuration file if provided
+	if *confFlag != "" {
+		if err := resolveConf(program, *confFlag); err != nil {
+			logger.Println(err)
+			return 1
+		}
+	}
+
+	// 2. Explicit CLI -bak flag overrides config BaseDir
+	if explicitFlags["bak"] {
+		program.BackupPath = *bakPathFlag
+	}
+
+	// 3. CLI database args override config database list
+	dbs := fs.Args()
 	if len(dbs) > 0 {
 		program.Databases = dbs
 	}
 
-	if program.BackupPath == "" {
-		program.BackupPath = *BackupPath
+	if len(program.Databases) == 0 {
+		fs.Usage()
+		return 1
 	}
 
-	if *BackupPath != defBak {
-		program.BackupPath = *BackupPath
-	}
-
-	if *h || *help {
-		program.Usage()
-	}
-
-	if *parents {
+	if *parentsFlag {
 		if err := os.MkdirAll(program.BackupPath, 0755); err != nil {
-			logger.Fatalf("failed to initialize root backup directory: %v", err)
+			logger.Printf("failed to initialize root backup directory: %v\n", err)
+			return 1
 		}
 	}
 
 	finfo, err := os.Stat(program.BackupPath)
 	if err != nil {
-		logger.Fatalf("could not verify backup path: %v", err)
+		logger.Printf("could not verify backup path: %v\n", err)
+		return 1
 	}
 	if !finfo.IsDir() {
-		logger.Fatalf("backup path must be a directory: %q", program.BackupPath)
-	}
-	if len(program.Databases) == 0 {
-		program.Usage()
+		logger.Printf("backup path must be a directory: %q\n", program.BackupPath)
+		return 1
 	}
 
 	for _, dbname := range program.Databases {
@@ -106,24 +118,23 @@ func init() {
 		}
 
 		if err := os.Mkdir(filepath.Join(program.BackupPath, dbname), 0775); err != nil {
-			logger.Fatalf("error initializing archive directory for %q: %v", dbname, err)
+			logger.Printf("error initializing archive directory for %q: %v\n", dbname, err)
+			return 1
 		}
 	}
-}
 
-func main() {
 	arch := bak.Archiver{
 		BackupPath: program.BackupPath,
 		TimeFormat: timeFormat,
 	}
 	arch.SetLogger(logger)
 
-	var exit int
+	var exitCode int
 	defer func() {
-		logger.Printf("Exit code: %d\n", exit)
+		logger.Printf("Exit code: %d\n", exitCode)
 
 		if program.Mailgun == nil {
-			os.Exit(exit)
+			return
 		}
 		if program.Mailgun.Subject == "" {
 			program.Mailgun.Subject = "MySQL Backup"
@@ -139,8 +150,6 @@ func main() {
 		if _, _, err := xmail.Send(&m); err != nil {
 			logger.Println(err)
 		}
-
-		os.Exit(exit)
 	}()
 
 	for _, dbname := range program.Databases {
@@ -151,20 +160,22 @@ func main() {
 		start := time.Now()
 		if err := arch.Archive(dbname); err != nil {
 			logger.Println(err)
-			exit = 1
+			exitCode = 1
 			continue
 		}
 
-		logger.Printf("Done in %s.\n\n", time.Now().Sub(start).String())
+		logger.Printf("Done in %s.\n\n", time.Since(start).String())
 		logger.Printf("Preparing to rotate backups for %q.\n", dbname)
 
 		if err := arch.Rotate(dbname); err != nil {
-			exit = 1
-			logger.Printf("Log rotation for %q encountered errors: %v", dbname, err)
+			exitCode = 1
+			logger.Printf("Log rotation for %q encountered errors: %v\n", dbname, err)
 		}
 
 		logger.Println()
 	}
+
+	return exitCode
 }
 
 func resolveConf(program *Program, path string) error {
@@ -173,7 +184,7 @@ func resolveConf(program *Program, path string) error {
 	}
 
 	if _, err := os.Stat(path); err != nil {
-		return fmt.Errorf("no config file found: %v", err)
+		return fmt.Errorf("no config file found: %w", err)
 	}
 
 	var conf Config
@@ -181,8 +192,9 @@ func resolveConf(program *Program, path string) error {
 	if err != nil {
 		return err
 	}
+	defer f.Close()
 
-	if _, err := toml.DecodeReader(f, &conf); err != nil {
+	if _, err := toml.NewDecoder(f).Decode(&conf); err != nil {
 		return err
 	}
 
